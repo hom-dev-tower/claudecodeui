@@ -20,10 +20,93 @@ async function saveProjectConfig(config) {
   await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
 }
 
+// Convert Claude project name to actual file path
+// Handles special cases like mount-remote and mount-remote2
+function convertProjectNameToPath(projectName) {
+  const fs = require('fs');
+  
+  // Handle special mount paths that should preserve hyphens
+  const mountPatterns = [
+    { pattern: /^-mount-remote2-/, replacement: '/mount-remote2/' },
+    { pattern: /^-mount-remote-/, replacement: '/mount-remote/' },
+    { pattern: /^-config-/, replacement: '/config/' }
+  ];
+  
+  for (const { pattern, replacement } of mountPatterns) {
+    if (pattern.test(projectName)) {
+      // Replace the mount prefix, then convert remaining dashes
+      const remainingPath = projectName.replace(pattern, '');
+      const basePath = replacement + remainingPath.replace(/-/g, '/');
+      
+      // First try the simple conversion
+      if (fs.existsSync(basePath)) {
+        return basePath;
+      }
+      
+      // If that doesn't work, try to find the correct path by testing combinations
+      return findCorrectPath(replacement, remainingPath) || basePath;
+    }
+  }
+  
+  // Default conversion for other paths
+  const simplePath = projectName.replace(/-/g, '/');
+  if (fs.existsSync(simplePath)) {
+    return simplePath;
+  }
+  
+  // Try to find the correct path for ambiguous cases
+  let testPath = projectName;
+  if (testPath.startsWith('-')) {
+    testPath = testPath.substring(1);
+  }
+  
+  const pathParts = testPath.split('-');
+  const foundPath = findCorrectPath('/', pathParts.join('-'));
+  return foundPath || '/' + pathParts.join('/');
+}
+
+// Helper function to find the correct path when dashes are ambiguous
+function findCorrectPath(basePath, remainingPath) {
+  const fs = require('fs');
+  const pathParts = remainingPath.split('-');
+  
+  // Try different combinations where some dashes might be part of directory names
+  for (let i = 0; i < pathParts.length; i++) {
+    for (let j = i; j < pathParts.length; j++) {
+      const testParts = [];
+      let k = 0;
+      
+      // Build path with different dash combinations
+      while (k <= i) {
+        testParts.push(pathParts[k]);
+        k++;
+      }
+      
+      if (j > i) {
+        // Join parts i+1 to j with dashes
+        testParts.push(pathParts.slice(i + 1, j + 1).join('-'));
+        k = j + 1;
+      }
+      
+      while (k < pathParts.length) {
+        testParts.push(pathParts[k]);
+        k++;
+      }
+      
+      const testPath = basePath + testParts.join('/');
+      if (fs.existsSync(testPath)) {
+        return testPath;
+      }
+    }
+  }
+  
+  return null;
+}
+
 // Generate better display name from path
 async function generateDisplayName(projectName) {
   // Convert "-home-user-projects-myapp" to a readable format
-  let projectPath = projectName.replace(/-/g, '/');
+  let projectPath = convertProjectNameToPath(projectName);
   
   // Try to read package.json from the project path
   try {
@@ -72,13 +155,23 @@ async function getProjects() {
         // Get display name from config or generate one
         const customName = config[entry.name]?.displayName;
         const autoDisplayName = await generateDisplayName(entry.name);
-        const fullPath = entry.name.replace(/-/g, '/');
+        const fullPath = convertProjectNameToPath(entry.name);
+        
+        // Validate that the path exists
+        let pathExists = false;
+        try {
+          await fs.access(fullPath);
+          pathExists = true;
+        } catch (e) {
+          console.warn(`Project path does not exist: ${fullPath} (from ${entry.name})`);
+        }
         
         const project = {
           name: entry.name,
           path: projectPath,
           displayName: customName || autoDisplayName,
           fullPath: fullPath,
+          pathExists: pathExists,
           isCustomName: !!customName,
           sessions: []
         };
@@ -105,7 +198,7 @@ async function getProjects() {
   // Add manually configured projects that don't exist as folders yet
   for (const [projectName, projectConfig] of Object.entries(config)) {
     if (!existingProjects.has(projectName) && projectConfig.manuallyAdded) {
-      const fullPath = projectName.replace(/-/g, '/');
+      const fullPath = convertProjectNameToPath(projectName);
       
       const project = {
         name: projectName,
@@ -318,8 +411,9 @@ async function renameProject(projectName, newDisplayName) {
     // Remove custom name if empty, will fall back to auto-generated
     delete config[projectName];
   } else {
-    // Set custom display name
+    // Preserve existing config and just update display name
     config[projectName] = {
+      ...config[projectName], // Preserve existing properties
       displayName: newDisplayName.trim()
     };
   }
@@ -483,5 +577,6 @@ module.exports = {
   deleteProject,
   addProjectManually,
   loadProjectConfig,
-  saveProjectConfig
+  saveProjectConfig,
+  convertProjectNameToPath
 };

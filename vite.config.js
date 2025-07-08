@@ -10,6 +10,7 @@ export default defineConfig(({ command, mode }) => {
     plugins: [react()],
     server: {
       port: parseInt(env.VITE_PORT) || 3001,
+      allowedHosts: ['3009.vs.vustudio.network', '.vs.vustudio.network', 'claude.vustudio.network'],
       proxy: {
         '/api': `http://localhost:${env.PORT || 3002}`,
         '/ws': {

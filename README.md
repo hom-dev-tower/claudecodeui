@@ -66,6 +66,10 @@ cp .env.example .env
 # Edit .env with your preferred settings
 ```
 
+Default ports:
+- Backend server: 3008
+- Frontend dev server: 3009 (development only)
+
 4. **Start the application:**
 ```bash
 # Development mode (with hot reload)
@@ -74,7 +78,8 @@ npm run dev
 ```
 
 5. **Open your browser:**
-   - Development: `http://localhost:3001`
+   - Development: `http://localhost:3009`
+   - Production: `http://localhost:3008`
 
 ## Security & Tools Configuration
 
@@ -96,6 +101,43 @@ To use Claude Code's full functionality, you'll need to manually enable tools:
 </div>
 
 **Recommended approach**: Start with basic tools enabled and add more as needed. You can always adjust these settings later.
+
+## Production Deployment
+
+### Running in Production
+
+```bash
+# Build frontend and start server
+npm start
+
+# Or separately:
+npm run build  # Build frontend
+npm run server # Start production server
+```
+
+### Docker Deployment
+
+When running in Docker containers (e.g., code-server), the app handles special mount paths:
+- `/mount-remote` - Network storage
+- `/mount-remote2` - Secondary storage
+- `/config` - Configuration directory
+
+### CloudFlare Tunnel Setup
+
+For remote access via CloudFlare tunnel:
+
+1. **Configure environment:**
+```bash
+# Add to .env
+PUBLIC_URL=https://your-domain.com
+```
+
+2. **Create tunnel** (only expose port 3008):
+```bash
+cloudflared tunnel --url http://localhost:3008
+```
+
+The Express server handles both API and static files, so only one port is needed.
 
 ## Usage Guide
 
@@ -205,6 +247,14 @@ d
 - Verify the project path exists and is accessible
 - Review server console logs for detailed error messages
 - Ensure you're not trying to access system directories outside project scope
+
+#### Path Resolution Issues
+**Problem**: "Project path not found" errors, especially with hyphenated directory names
+**Solutions**:
+- The app intelligently handles paths with hyphens (e.g., `vu-one-web`)
+- Check server logs for path resolution details
+- Verify the actual directory structure matches Claude's project name
+- Docker mount paths (`/mount-remote`, `/config`) are preserved correctly
 
 
 ## License

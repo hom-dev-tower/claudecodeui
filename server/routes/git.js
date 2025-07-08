@@ -3,15 +3,17 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const path = require('path');
 const fs = require('fs').promises;
+const { convertProjectNameToPath } = require('../projects');
 
 const router = express.Router();
+
+// Create exec with proper shell - try default shell first
 const execAsync = promisify(exec);
 
 // Helper function to get the actual project path from the encoded project name
 function getActualProjectPath(projectName) {
-  // Claude stores projects with dashes instead of slashes
-  // Convert "-Users-dmieloch-Dev-experiments-claudecodeui" to "/Users/dmieloch/Dev/experiments/claudecodeui"
-  return projectName.replace(/-/g, '/');
+  // Use the proper conversion that handles mount paths
+  return convertProjectNameToPath(projectName);
 }
 
 // Get git status for a project

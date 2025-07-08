@@ -209,7 +209,7 @@ function Sidebar({
     }
   };
 
-  const createNewProject = async () => {
+  const createNewProject = async (createIfNotExists = false) => {
     if (!newProjectPath.trim()) {
       alert('Please enter a project path');
       return;
@@ -224,7 +224,8 @@ function Sidebar({
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ 
-          path: newProjectPath.trim()
+          path: newProjectPath.trim(),
+          createIfNotExists: createIfNotExists
         }),
       });
 
@@ -241,7 +242,22 @@ function Sidebar({
         }
       } else {
         const error = await response.json();
-        alert(error.error || 'Failed to create project. Please try again.');
+        
+        // Check if directory needs to be created
+        if (response.status === 404 && error.needsCreation) {
+          const shouldCreate = window.confirm(
+            `Directory does not exist:\n${error.path}\n\nWould you like to create it?`
+          );
+          
+          if (shouldCreate) {
+            // Retry with createIfNotExists flag
+            setCreatingProject(false);
+            return createNewProject(true);
+          }
+        } else {
+          let errorMessage = error.error || 'Failed to create project. Please try again.';
+          alert(errorMessage);
+        }
       }
     } catch (error) {
       console.error('Error creating project:', error);
@@ -399,7 +415,7 @@ function Sidebar({
             <Input
               value={newProjectPath}
               onChange={(e) => setNewProjectPath(e.target.value)}
-              placeholder="/path/to/project or relative/path"
+              placeholder="Enter project name or absolute path"
               className="text-sm focus:ring-2 focus:ring-primary/20"
               autoFocus
               onKeyDown={(e) => {
@@ -407,10 +423,13 @@ function Sidebar({
                 if (e.key === 'Escape') cancelNewProject();
               }}
             />
+            <p className="text-xs text-muted-foreground">
+              Relative paths will be created in /config/workspace/
+            </p>
             <div className="flex gap-2">
               <Button
                 size="sm"
-                onClick={createNewProject}
+                onClick={() => createNewProject()}
                 disabled={!newProjectPath.trim() || creatingProject}
                 className="flex-1 h-8 text-xs hover:bg-primary/90 transition-colors"
               >
@@ -428,9 +447,9 @@ function Sidebar({
             </div>
           </div>
           
-          {/* Mobile Form - Simple Overlay */}
-          <div className="md:hidden fixed inset-0 z-50 bg-black/50 backdrop-blur-sm">
-            <div className="absolute bottom-0 left-0 right-0 bg-card rounded-t-lg border-t border-border p-4 space-y-4 animate-in slide-in-from-bottom duration-300">
+          {/* Mobile Form - Centered Modal */}
+          <div className="md:hidden fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="w-full max-w-sm bg-card rounded-lg border border-border p-4 space-y-4 animate-in zoom-in-95 duration-200">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <div className="w-6 h-6 bg-primary/10 rounded-md flex items-center justify-center">
@@ -453,7 +472,7 @@ function Sidebar({
                 <Input
                   value={newProjectPath}
                   onChange={(e) => setNewProjectPath(e.target.value)}
-                  placeholder="/path/to/project or relative/path"
+                  placeholder="Enter project name or absolute path"
                   className="text-sm h-10 rounded-md focus:border-primary transition-colors"
                   autoFocus
                   onKeyDown={(e) => {
@@ -461,6 +480,9 @@ function Sidebar({
                     if (e.key === 'Escape') cancelNewProject();
                   }}
                 />
+                <p className="text-xs text-muted-foreground px-1">
+                  Relative paths will be created in /config/workspace/
+                </p>
                 
                 <div className="flex gap-2">
                   <Button
@@ -472,7 +494,7 @@ function Sidebar({
                     Cancel
                   </Button>
                   <Button
-                    onClick={createNewProject}
+                    onClick={() => createNewProject()}
                     disabled={!newProjectPath.trim() || creatingProject}
                     className="flex-1 h-9 text-sm rounded-md bg-primary hover:bg-primary/90 active:scale-95 transition-all"
                   >
@@ -481,8 +503,6 @@ function Sidebar({
                 </div>
               </div>
               
-              {/* Safe area for mobile */}
-              <div className="h-4" />
             </div>
           </div>
         </div>

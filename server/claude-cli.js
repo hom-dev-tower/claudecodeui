@@ -1,4 +1,6 @@
 const { spawn } = require('child_process');
+const fs = require('fs').promises;
+const path = require('path');
 
 let activeClaudeProcesses = new Map(); // Track active processes by session ID
 
@@ -59,8 +61,20 @@ async function spawnClaude(command, options = {}, ws) {
       }
     }
     
-    // Use cwd (actual project directory) instead of projectPath (Claude's metadata directory)
-    const workingDir = cwd || process.cwd();
+    // Validate and determine working directory
+    let workingDir = cwd || process.cwd();
+    
+    // Check if the working directory exists
+    try {
+      await fs.access(workingDir);
+      console.log('✅ Working directory exists:', workingDir);
+    } catch (error) {
+      console.warn(`⚠️  Working directory does not exist: ${workingDir}`);
+      // Fall back to home directory or current directory
+      workingDir = process.env.HOME || process.cwd();
+      console.log('📁 Using fallback directory:', workingDir);
+    }
+    
     console.log('Spawning Claude CLI:', 'claude', args.map(arg => {
       const cleanArg = arg.replace(/\n/g, '\\n').replace(/\r/g, '\\r');
       return cleanArg.includes(' ') ? `"${cleanArg}"` : cleanArg;

@@ -28,7 +28,7 @@ const fs = require('fs').promises;
 const { spawn } = require('child_process');
 const os = require('os');
 const pty = require('node-pty');
-const fetch = require('node-fetch');
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const { getProjects, getSessions, getSessionMessages, renameProject, deleteSession, deleteProject, addProjectManually } = require('./projects');
 const { spawnClaude, abortClaudeSession } = require('./claude-cli');
@@ -152,17 +152,31 @@ app.use('/api/git', gitRoutes);
 
 // API Routes
 app.get('/api/config', (req, res) => {
-  // Always use the server's actual IP and port for WebSocket connections
-  const serverIP = getServerIP();
-  const host = `${serverIP}:${PORT}`;
-  const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'wss' : 'ws';
-  
-  console.log('Config API called - Returning host:', host, 'Protocol:', protocol);
-  
-  res.json({
-    serverPort: PORT,
-    wsUrl: `${protocol}://${host}`
-  });
+  // Use PUBLIC_URL if available (for production with CloudFlare tunnel)
+  if (process.env.PUBLIC_URL) {
+    const publicUrl = new URL(process.env.PUBLIC_URL);
+    const protocol = publicUrl.protocol === 'https:' ? 'wss' : 'ws';
+    const wsUrl = `${protocol}://${publicUrl.host}`;
+    
+    console.log('Config API called - Using PUBLIC_URL:', wsUrl);
+    
+    res.json({
+      serverPort: PORT,
+      wsUrl: wsUrl
+    });
+  } else {
+    // Fallback to server's actual IP and port for development
+    const serverIP = getServerIP();
+    const host = `${serverIP}:${PORT}`;
+    const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'wss' : 'ws';
+    
+    console.log('Config API called - Returning host:', host, 'Protocol:', protocol);
+    
+    res.json({
+      serverPort: PORT,
+      wsUrl: `${protocol}://${host}`
+    });
+  }
 });
 
 app.get('/api/projects', async (req, res) => {
@@ -231,13 +245,53 @@ app.delete('/api/projects/:projectName', async (req, res) => {
 // Create project endpoint
 app.post('/api/projects/create', async (req, res) => {
   try {
-    const { path: projectPath } = req.body;
+    const { path: projectPath, createIfNotExists } = req.body;
+    const fs = require('fs').promises;
+    const pathModule = require('path');
     
     if (!projectPath || !projectPath.trim()) {
       return res.status(400).json({ error: 'Project path is required' });
     }
     
-    const project = await addProjectManually(projectPath.trim());
+    const trimmedPath = projectPath.trim();
+    let absolutePath;
+    
+    // If path is already absolute, use it as is
+    if (pathModule.isAbsolute(trimmedPath)) {
+      absolutePath = trimmedPath;
+    } else {
+      // For relative paths, create them in /config/workspace instead of current directory
+      absolutePath = pathModule.join('/config/workspace', trimmedPath);
+    }
+    
+    // Check if path exists
+    let pathExists = true;
+    try {
+      await fs.access(absolutePath);
+    } catch (error) {
+      pathExists = false;
+    }
+    
+    // If path doesn't exist and user wants to create it
+    if (!pathExists && createIfNotExists) {
+      try {
+        await fs.mkdir(absolutePath, { recursive: true });
+        console.log(`Created directory: ${absolutePath}`);
+      } catch (error) {
+        return res.status(500).json({ 
+          error: `Failed to create directory: ${error.message}` 
+        });
+      }
+    } else if (!pathExists) {
+      // Return a specific error that frontend can handle
+      return res.status(404).json({ 
+        error: 'Path does not exist',
+        path: absolutePath,
+        needsCreation: true
+      });
+    }
+    
+    const project = await addProjectManually(absolutePath);
     res.json({ success: true, project });
   } catch (error) {
     console.error('Error creating project:', error);
@@ -370,7 +424,7 @@ app.put('/api/projects/:projectName/file', async (req, res) => {
 
 app.get('/api/projects/:projectName/files', async (req, res) => {
   try {
-    
+    const { convertProjectNameToPath } = require('./projects');
     const fs = require('fs').promises;
     const projectPath = path.join(process.env.HOME, '.claude', 'projects', req.params.projectName);
     
@@ -383,36 +437,8 @@ app.get('/api/projects/:projectName/files', async (req, res) => {
       const metadata = JSON.parse(await fs.readFile(metadataPath, 'utf8'));
       actualPath = metadata.path || metadata.cwd;
     } catch (e) {
-      // Fallback: try to find the actual path by testing different dash interpretations
-      let testPath = req.params.projectName;
-      if (testPath.startsWith('-')) {
-        testPath = testPath.substring(1);
-      }
-      
-      // Try to intelligently decode the path by testing which directories exist
-      const pathParts = testPath.split('-');
-      actualPath = '/' + pathParts.join('/');
-      
-      // If the simple replacement doesn't work, try to find the correct path
-      // by testing combinations where some dashes might be part of directory names
-      if (!require('fs').existsSync(actualPath)) {
-        // Try different combinations of dash vs slash
-        for (let i = pathParts.length - 1; i >= 0; i--) {
-          let testParts = [...pathParts];
-          // Try joining some parts with dashes instead of slashes
-          for (let j = i; j < testParts.length - 1; j++) {
-            testParts[j] = testParts[j] + '-' + testParts[j + 1];
-            testParts.splice(j + 1, 1);
-            let testActualPath = '/' + testParts.join('/');
-            if (require('fs').existsSync(testActualPath)) {
-              actualPath = testActualPath;
-              break;
-            }
-          }
-          if (require('fs').existsSync(actualPath)) break;
-        }
-      }
-      
+      // Use our improved conversion function
+      actualPath = convertProjectNameToPath(req.params.projectName);
     }
     
     // Check if path exists
@@ -662,6 +688,9 @@ app.post('/api/transcribe', async (req, res) => {
   try {
     const multer = require('multer');
     const upload = multer({ storage: multer.memoryStorage() });
+    const { transcribeWithWhisperLive } = require('./whisperlive-client');
+    const path = require('path');
+    const os = require('os');
     
     // Handle multipart form data
     upload.single('audio')(req, res, async (err) => {
@@ -673,9 +702,154 @@ app.post('/api/transcribe', async (req, res) => {
         return res.status(400).json({ error: 'No audio file provided' });
       }
       
+      // Check if we should use Faster-Whisper (OpenAI-compatible)
+      const useFasterWhisper = process.env.USE_FASTER_WHISPER === 'true';
+      const fasterWhisperUrl = process.env.FASTER_WHISPER_URL;
+      
+      if (useFasterWhisper && fasterWhisperUrl) {
+        try {
+          // Create form data for Faster-Whisper (OpenAI-compatible API)
+          const FormData = require('form-data');
+          const formData = new FormData();
+          formData.append('audio_file', req.file.buffer, {
+            filename: req.file.originalname,
+            contentType: req.file.mimetype
+          });
+          // whisper-asr-webservice parameters
+          formData.append('encode', 'true');
+          formData.append('task', 'transcribe');
+          formData.append('language', 'en'); // Optional, remove for auto-detect
+          formData.append('output', 'json');
+          
+          console.log('Transcribing with Faster-Whisper at:', fasterWhisperUrl);
+          
+          // Make request to whisper-asr-webservice
+          // The API endpoint is /asr for whisper-asr-webservice
+          const response = await fetch(`${fasterWhisperUrl}/asr`, {
+            method: 'POST',
+            headers: {
+              ...formData.getHeaders()
+            },
+            body: formData
+          });
+          
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error?.message || `Faster-Whisper error: ${response.status}`);
+          }
+          
+          // Try to parse as JSON first, fall back to plain text
+          let transcribedText = '';
+          const contentType = response.headers.get('content-type');
+          
+          if (contentType && contentType.includes('application/json')) {
+            const data = await response.json();
+            transcribedText = data.text || data.transcript || '';
+          } else {
+            // Plain text response
+            transcribedText = await response.text();
+          }
+          
+          // Handle enhancement modes if requested
+          const mode = req.body.mode || 'default';
+          
+          if (!transcribedText || mode === 'default') {
+            return res.json({ text: transcribedText });
+          }
+          
+          // Enhancement logic (same as OpenAI)
+          try {
+            const apiKey = process.env.OPENAI_API_KEY;
+            if (apiKey) {
+              const OpenAI = require('openai');
+              const openai = new OpenAI({ apiKey });
+              
+              let prompt, systemMessage, temperature = 0.7, maxTokens = 800;
+              
+              switch (mode) {
+                case 'prompt':
+                  systemMessage = 'You are an expert prompt engineer who creates clear, detailed, and effective prompts.';
+                  prompt = `You are an expert prompt engineer. Transform the following rough instruction into a clear, detailed, and context-aware AI prompt.
+
+Your enhanced prompt should:
+1. Be specific and unambiguous
+2. Include relevant context and constraints
+3. Specify the desired output format
+4. Use clear, actionable language
+5. Include examples where helpful
+6. Consider edge cases and potential ambiguities
+
+Transform this rough instruction into a well-crafted prompt:
+"${transcribedText}"
+
+Enhanced prompt:`;
+                  break;
+                  
+                case 'vibe':
+                case 'instructions':
+                case 'architect':
+                  systemMessage = 'You are a helpful assistant that formats ideas into clear, actionable instructions for AI agents.';
+                  temperature = 0.5;
+                  prompt = `Transform the following idea into clear, well-structured instructions that an AI agent can easily understand and execute.
+
+IMPORTANT RULES:
+- Format as clear, step-by-step instructions
+- Add reasonable implementation details based on common patterns
+- Only include details directly related to what was asked
+- Do NOT add features or functionality not mentioned
+- Keep the original intent and scope intact
+- Use clear, actionable language an agent can follow
+
+Transform this idea into agent-friendly instructions:
+"${transcribedText}"
+
+Agent instructions:`;
+                  break;
+              }
+              
+              if (prompt) {
+                const completion = await openai.chat.completions.create({
+                  model: 'gpt-4o-mini',
+                  messages: [
+                    { role: 'system', content: systemMessage },
+                    { role: 'user', content: prompt }
+                  ],
+                  temperature: temperature,
+                  max_tokens: maxTokens
+                });
+                
+                return res.json({ text: completion.choices[0].message.content || transcribedText });
+              }
+            }
+          } catch (gptError) {
+            console.error('GPT enhancement error:', gptError);
+          }
+          
+          return res.json({ text: transcribedText });
+          
+        } catch (error) {
+          console.error('Faster-Whisper error:', error);
+          res.status(500).json({ error: 'Transcription failed: ' + error.message });
+        }
+        
+        return;
+      }
+      
+      // Check if we should use WhisperLive (legacy, not recommended)
+      const useWhisperLive = process.env.USE_WHISPERLIVE === 'true';
+      const whisperLiveUrl = process.env.WHISPERLIVE_URL;
+      
+      if (useWhisperLive && whisperLiveUrl) {
+        // WhisperLive code remains but is not recommended
+        return res.status(500).json({ 
+          error: 'WhisperLive is not supported due to audio format incompatibility. Please use Faster-Whisper or OpenAI API instead.' 
+        });
+      }
+      
+      // Fall back to OpenAI if WhisperLive is not configured
       const apiKey = process.env.OPENAI_API_KEY;
       if (!apiKey) {
-        return res.status(500).json({ error: 'OpenAI API key not configured. Please set OPENAI_API_KEY in server environment.' });
+        return res.status(500).json({ error: 'No transcription service configured. Please set either USE_WHISPERLIVE=true with WHISPERLIVE_URL or provide OPENAI_API_KEY.' });
       }
       
       try {
@@ -691,7 +865,7 @@ app.post('/api/transcribe', async (req, res) => {
         formData.append('language', 'en');
         
         // Make request to OpenAI
-        const fetch = require('node-fetch');
+        const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
         const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
           method: 'POST',
           headers: {
